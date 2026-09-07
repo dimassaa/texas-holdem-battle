@@ -31,11 +31,13 @@ class TestRng:
         c1 = parent.child(1)
         c2 = parent.child(2)
         assert not np.array_equal(c1.random(10), c2.random(10))
-        # parent stream position must not be affected by spawning children
-        before = parent.random(3)
-        parent.child(3).random(10)
-        after = parent.random(3)
-        assert np.array_equal(before, after)
+        # spawning children must not perturb the parent stream: an identical
+        # parent that spawned/consumed a child draws the same values as one
+        # that never spawned.
+        p1 = Rng(10)
+        p2 = Rng(10)
+        p1.child(3).random(10)
+        assert np.array_equal(p1.random(3), p2.random(3))
 
 
 class TestSubseed:
