@@ -33,6 +33,15 @@ class TestScore5:
         best_lower = [H(14, 1), H(14, 2), H(14, 3), H(13, 2), H(13, 3)]
         assert score_5(royal) > score_5(best_lower)
 
+    def test_flush_and_high_card_scores_are_order_invariant(self):
+        from poker.card import card_id as H
+        # The same cards must score identically regardless of input order —
+        # regression guard for the flush/high-card kicker ordering bug.
+        flush = [H(14, 0), H(10, 0), H(8, 0), H(6, 0), H(3, 0)]
+        assert score_5(flush) == score_5(flush[::-1])
+        high = [H(14, 0), H(11, 1), H(8, 2), H(6, 0), H(2, 1)]
+        assert score_5(high) == score_5(high[::-1])
+
 
 class TestHandScore:
     def test_picks_best_five_of_seven(self):

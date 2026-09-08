@@ -68,7 +68,7 @@ def evaluate_5_reference(cards):
         trips, pair = groups[0][1], groups[1][1]
         return (6, (trips - 2, pair - 2, 0, 0, 0))
     if is_flush:
-        return (5, tuple(r - 2 for r in ranks))  # 5 kickers, already 5 long
+        return (5, tuple(r - 2 for r in sorted(ranks, reverse=True)))  # 5 kickers, most significant first
     if straight_high is not None:
         return (4, (straight_high - 2, 0, 0, 0, 0))
     if groups[0][0] == 3:                     # three of a kind
@@ -83,7 +83,7 @@ def evaluate_5_reference(cards):
         pair = groups[0][1]
         kickers = [r for r in ranks if r != pair]
         return (1, (pair - 2,) + tuple(sorted((r - 2 for r in kickers), reverse=True)) + (0,))
-    return (0, tuple(r - 2 for r in ranks))   # high card, already 5 long
+    return (0, tuple(r - 2 for r in sorted(ranks, reverse=True)))  # high card, most significant first
 
 
 # ---------------------------------------------------------------------------
@@ -101,10 +101,7 @@ def score_5(cards) -> int:
     is written in plain Python (indexing, not numpy) so it is numba-jittable
     in Stage 03; correctness is pinned to the reference by tests.
     """
-    # Input-order ranks (reference evaluator uses these for flush / high card).
-    ranks_input = [card.rank_of(c) for c in cards]
-    # Sorted ranks (used for group detection and most kicker orderings).
-    ranks = sorted(ranks_input, reverse=True)
+    ranks = sorted((card.rank_of(c) for c in cards), reverse=True)
     suits = [card.suit_of(c) for c in cards]
     is_flush = all(s == suits[0] for s in suits)
 
@@ -131,8 +128,7 @@ def score_5(cards) -> int:
         kick = (groups[0][1] - 2, groups[1][1] - 2, 0, 0, 0)
         cat = 6
     elif is_flush:
-        # Reference returns flush kickers in input order, not sorted.
-        kick = tuple(r - 2 for r in ranks_input)
+        kick = tuple(r - 2 for r in ranks)
         cat = 5
     elif straight_high is not None:
         kick = (straight_high - 2, 0, 0, 0, 0)
@@ -153,8 +149,7 @@ def score_5(cards) -> int:
         kick = (pair_r - 2,) + tuple(r - 2 for r in rest) + (0,)
         cat = 1
     else:
-        # Reference returns high-card kickers in input order, not sorted.
-        kick = tuple(r - 2 for r in ranks_input)
+        kick = tuple(r - 2 for r in ranks)
         cat = 0
 
     # Assemble: category digit + five normalized kicker digits (base 13).
