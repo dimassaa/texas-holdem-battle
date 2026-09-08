@@ -143,11 +143,13 @@ class TestRng:
         c1 = parent.child(1)
         c2 = parent.child(2)
         assert not np.array_equal(c1.random(10), c2.random(10))
-        # parent stream position must not be affected by spawning children
-        before = parent.random(3)
-        parent.child(3).random(10)
-        after = parent.random(3)
-        assert np.array_equal(before, after)
+        # spawning children must not perturb the parent stream: an identical
+        # parent that spawned/consumed a child draws the same values as one
+        # that never spawned.
+        p1 = Rng(10)
+        p2 = Rng(10)
+        p1.child(3).random(10)
+        assert np.array_equal(p1.random(3), p2.random(3))
 
 
 class TestSubseed:
@@ -528,7 +530,7 @@ def evaluate_5_reference(cards):
         trips, pair = groups[0][1], groups[1][1]
         return (6, (trips - 2, pair - 2, 0, 0, 0))
     if is_flush:
-        return (5, tuple(r - 2 for r in ranks))  # 5 kickers, already 5 long
+        return (5, tuple(r - 2 for r in sorted(ranks, reverse=True)))  # 5 kickers, most significant first
     if straight_high is not None:
         return (4, (straight_high - 2, 0, 0, 0, 0))
     if groups[0][0] == 3:                     # three of a kind
@@ -543,7 +545,7 @@ def evaluate_5_reference(cards):
         pair = groups[0][1]
         kickers = [r for r in ranks if r != pair]
         return (1, (pair - 2,) + tuple(sorted((r - 2 for r in kickers), reverse=True)) + (0,))
-    return (0, tuple(r - 2 for r in ranks))   # high card, already 5 long
+    return (0, tuple(r - 2 for r in sorted(ranks, reverse=True)))  # high card, most significant first
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -603,6 +605,15 @@ class TestScore5:
         royal = [H(14, 0), H(13, 0), H(12, 0), H(11, 0), H(10, 0)]
         best_lower = [H(14, 1), H(14, 2), H(14, 3), H(13, 2), H(13, 3)]
         assert score_5(royal) > score_5(best_lower)
+
+    def test_flush_and_high_card_scores_are_order_invariant(self):
+        from poker.card import card_id as H
+        # The same cards must score identically regardless of input order —
+        # regression guard for the flush/high-card kicker ordering bug.
+        flush = [H(14, 0), H(10, 0), H(8, 0), H(6, 0), H(3, 0)]
+        assert score_5(flush) == score_5(flush[::-1])
+        high = [H(14, 0), H(11, 1), H(8, 2), H(6, 0), H(2, 1)]
+        assert score_5(high) == score_5(high[::-1])
 
 
 class TestHandScore:
@@ -739,7 +750,7 @@ Make sure module-level `import numpy as np` and a `card` module alias are placed
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_hand_evaluator_fast.py`
-Expected: `5 passed`
+Expected: `6 passed`
 
 - [ ] **Step 5: Commit**
 
