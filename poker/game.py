@@ -192,3 +192,65 @@ def run_betting_round(state: "GameState", actions_override=None) -> None:
     # Finalize: move the whole street into the pot exactly once.
     state.pot += sum(state.round_bets.values())
     state.round_bets = {}
+
+
+@dataclass
+class SidePot:
+    """A layer of the pot plus the player indices eligible to win it."""
+    amount: int
+    eligible: tuple[int, ...]
+
+
+def build_side_pots(players) -> list[SidePot]:
+    """Layered side-pot construction from per-player total contributions.
+
+    Level widths follow ALL contributors (folded money included); eligibility
+    is restricted to players who have NOT folded — a folded hand forfeits every
+    layer it stands in. When no live player covers a layer (everyone there
+    folded), that width is dead money: it rolls into the live pot beneath it,
+    so the amounts always sum to total contributions (conservation invariant).
+    """
+    contrib = [p.contributed for p in players]
+    levels = sorted(set(c for c in contrib if c > 0))
+    pots = []
+    prev = 0
+    dead = 0   # chips forfeited by folded players above every live contribution
+    for level in levels:
+        width = level - prev
+        layer = width * len([c for c in contrib if c >= level])
+        eligible = tuple(i for i, c in enumerate(contrib)
+                         if c >= level and not players[i].folded)
+        if eligible:
+            pots.append(SidePot(amount=layer + dead, eligible=eligible))
+            dead = 0
+        else:
+            dead += layer
+        prev = level
+    if dead and pots:
+        pots[-1] = SidePot(amount=pots[-1].amount + dead, eligible=pots[-1].eligible)
+    elif dead:
+        # Everyone folded: there is no live pot, but the dead chips must still
+        # be preserved so amounts sum to total contributions (conservation).
+        pots = [SidePot(amount=dead, eligible=tuple())]
+    return pots or [SidePot(0, tuple())]
+
+
+def _winner_indices(scores, eligible) -> tuple[int, ...]:
+    """Indices among `eligible` holding the highest score (ties included)."""
+    best = max((scores[i] for i in eligible))
+    return tuple(i for i in eligible if scores[i] == best)
+
+
+def pay_out(state: GameState, scores) -> None:
+    """Distribute every side pot to the best hand among its eligible players.
+
+    `scores` maps player index -> encoded hand score (higher better). Ties
+    split equally. Mutates players' stacks by the net win. Conservation is
+    enforced by construction (amounts sum to total contributions).
+    """
+    pots = build_side_pots(state.players)
+    for pot in pots:
+        winners = _winner_indices(scores, pot.eligible)
+        share = pot.amount / len(winners)
+        for w in winners:
+            state.players[w].stack += share
