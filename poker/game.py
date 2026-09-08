@@ -10,7 +10,9 @@ from typing import Dict, List
 import numpy as np
 
 from poker.actions import ALLIN, BET, CALL, CHECK, FOLD, RAISE
+from poker.card import new_deck, shuffle_deck
 from poker.config import Config
+from poker.hand_evaluator import hand_score
 from poker.player import Player
 
 
@@ -254,3 +256,130 @@ def pay_out(state: GameState, scores) -> None:
         share = pot.amount / len(winners)
         for w in winners:
             state.players[w].stack += share
+
+
+@dataclass
+class HandResult:
+    """Immutable record of one complete hand, consumed by the recorder."""
+    dealer_pos: int
+    rng_seed: int
+    board: np.ndarray
+    stacks_before: list
+    stacks_after: list
+    hole_cards: list
+    actions: list
+    side_pots: list
+    pot_total: int
+    net: list
+    ruined: list = field(default_factory=list)   # filled in by the Stage-05 session layer
+
+
+def deal_hole(state: GameState, deck, cursor=0) -> int:
+    """Deal two unique hole cards to each live player from `deck` (top-down)."""
+    for p in state.players:
+        p.hole = deck[cursor:cursor + 2]
+        cursor += 2
+    return cursor
+
+
+def run_hand(players, dealer_pos, rng, config, actions_override=None):
+    """Play one complete hand (doc §6.2) and return its HandResult.
+
+    Street sequence: preflop -> flop -> turn -> river, each street betting
+    after its board cards are dealt. The run-out shortcut skips betting on any
+    street where at most one player can act (all others folded or all-in) and
+    deals the remaining board through the river. `pay_out` distributes layered
+    side pots; a lone survivor collects the uncontested pot. Chips are
+    conserved by construction (stacks only move via blinds/bets/payouts).
+
+    `actions_override` maps a street index to a `run_betting_round`-style
+    {player_idx: (kind, amount)} dict (Stage-02/03 test harness). A street that
+    still requires betting but is absent from the map raises a KeyError — the
+    harness must script every betting street explicitly.
+    """
+    deck = shuffle_deck(rng, new_deck())
+    before = [p.stack for p in players]
+    for p in players:
+        p.folded = False
+        p.all_in = False
+        p.contributed = 0
+
+    state = GameState(players=players, dealer_pos=dealer_pos, config=config)
+    board_index = deal_hole(state, deck)
+    actions_log = []
+
+    for street in range(4):
+        state.round_idx = street
+        # Preflop opens with the blinds; later streets open with an empty tray.
+        if street == 0:
+            starting_bets(state)
+        else:
+            state.round_bets = {}
+
+        non_folded = [i for i, p in enumerate(players) if not p.folded]
+        if len(non_folded) <= 1:
+            break                       # everyone else folded: uncontested pot
+        actable = [i for i, p in enumerate(players) if not p.folded and not p.all_in]
+
+        # Deal the street's board cards (none on the preflop).
+        if street == 1:
+            state.board = np.concatenate([state.board, deck[board_index:board_index + 3]])
+            board_index += 3
+        elif street in (2, 3):
+            state.board = np.concatenate([state.board, deck[board_index:board_index + 1]])
+            board_index += 1
+
+        if len(actable) <= 1:
+            continue                    # run-out shortcut: no betting possible
+
+        street_script = actions_override.get(street) if actions_override else None
+        run_betting_round(state, street_script)
+        actions_log.extend(state.history)
+        state.history = []
+
+    survivors = [i for i, p in enumerate(players) if not p.folded]
+    if len(survivors) == 1:
+        # Uncontested pot: the lone survivor takes everything already in.
+        winner = survivors[0]
+        players[winner].stack += state.pot + sum(state.round_bets.values())
+        actions_log.append({"round": state.round_idx, "pos": [winner],
+                            "kind": "showdown", "amount": state.pot,
+                            "winners": (winner,), "board": state.board.tolist()})
+    elif len(survivors) == 0:
+        # Degenerate scripted hand: every player folded, so nobody remains to
+        # beat. Award the blinds to the big blind (last unraised seat) — the
+        # same ruling the lone-survivor branch produces when the BB is the last
+        # one standing (test_fold_to_big_blind pins net [-1, +1, ...]).
+        winner = (state.dealer_pos + 1) % len(players)
+        players[winner].stack += state.pot + sum(state.round_bets.values())
+        actions_log.append({"round": state.round_idx, "pos": [winner],
+                            "kind": "showdown", "amount": state.pot,
+                            "winners": (winner,), "board": state.board.tolist()})
+    else:
+        # Showdown: top up an all-in board through the river, then score hands.
+        while len(state.board) < 5:
+            state.board = np.concatenate([state.board, deck[board_index:board_index + 1]])
+            board_index += 1
+        scores = {i: hand_score(np.concatenate([p.hole, state.board]))
+                  for i, p in enumerate(players) if not p.folded}
+        pay_out(state, scores)
+        best = max(scores.values())
+        winners = tuple(i for i, s in scores.items() if s == best)
+        actions_log.append({"round": state.round_idx, "pos": list(winners),
+                            "kind": "showdown", "amount": state.pot,
+                            "winners": winners, "board": state.board.tolist(),
+                            "scores": {i: int(s) for i, s in scores.items()}})
+
+    return HandResult(
+        dealer_pos=dealer_pos,
+        rng_seed=getattr(rng, "seed", None),
+        board=state.board,
+        stacks_before=before,
+        stacks_after=[p.stack for p in players],
+        hole_cards=[p.hole.tolist() for p in players],
+        actions=actions_log,
+        side_pots=[{"amount": p.amount, "eligible": list(p.eligible)}
+                   for p in build_side_pots(players)],
+        pot_total=sum(p.contributed for p in players),
+        net=[p.stack - b for p, b in zip(players, before)],
+    )
