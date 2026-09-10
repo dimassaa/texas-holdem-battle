@@ -150,3 +150,44 @@ class EquityProvider:
         """Required winning share for a break-even call (doc §5 input)."""
         denom = self.pot + self.to_call
         return 0.0 if denom == 0 else self.to_call / denom
+
+
+from poker.jit import score_batch_jit  # noqa: E402  (module-level, after class)
+
+
+def calc_equity_jit(hand, board, num_opponents, rng, mc_iterations, cache=None):
+    """The Task-3.3 Monte Carlo, re-scored through the numba batch path.
+
+    Orchestration (pool, deal permutations, runout sharing, win/tie counting)
+    is byte-identical to `calc_equity`; only `score_batch` -> `score_batch_jit`
+    differs, so semantics match by construction and determinism is preserved.
+    """
+    key = (tuple(int(c) for c in hand), tuple(int(c) for c in board), num_opponents)
+    if cache is not None and key in cache:
+        return cache[key]
+    pool = _cards_left(hand, board)
+    m = 5 - len(board)                 # runout cards still to come
+    k = 2 * num_opponents + m
+    drawn = deal_permutations(rng, pool, mc_iterations, k)
+    # When m == 0 the board is already complete; -0 == 0 in Python, so
+    # drawn[:, -0:] would return the full array instead of an empty slice.
+    runout = drawn[:, -m:] if m else np.empty((mc_iterations, 0), dtype=np.int32)
+    hero_seven = np.empty((mc_iterations, 7), dtype=np.int32)
+    opp_seven = np.empty((mc_iterations, num_opponents, 7), dtype=np.int32)
+    for j in range(num_opponents):
+        opp_hole = drawn[:, 2*j:2*j+2]
+        opp_seven[:, j, :2] = opp_hole
+        opp_seven[:, j, 2:2+len(board)] = np.broadcast_to(board, (mc_iterations, len(board)))
+        opp_seven[:, j, 2+len(board):] = runout
+    hero_seven[:, :2] = np.broadcast_to(hand, (mc_iterations, 2))
+    hero_seven[:, 2:2+len(board)] = np.broadcast_to(board, (mc_iterations, len(board)))
+    hero_seven[:, 2+len(board):] = runout
+
+    hero = score_batch_jit(hero_seven)
+    best_opp = np.max([score_batch_jit(opp_seven[:, j]) for j in range(num_opponents)], axis=0)
+    wins = np.count_nonzero(hero > best_opp)
+    ties = np.count_nonzero(hero == best_opp)
+    eq = (wins + 0.5 * ties) / mc_iterations
+    if cache is not None:
+        cache[key] = eq
+    return float(eq)
