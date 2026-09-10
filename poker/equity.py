@@ -113,3 +113,40 @@ def calc_equity(hand, board, num_opponents, rng, mc_iterations, cache=None):
     if cache is not None:
         cache[key] = eq
     return float(eq)
+
+
+class EquityProvider:
+    """Cache + context manager for hand-strength queries.
+
+    A fresh instance is created per hand (or per decision site) so `cache` and
+    `_cache_hits` are short-lived by construction — stale-equity-across-hands
+    is impossible (data-quality requirement).
+    """
+
+    def __init__(self, rng, config, pot=0, to_call=0):
+        self.rng = rng
+        self.config = config
+        self.pot = pot
+        self.to_call = to_call
+        self._cache = {}
+        self._cache_hits = 0
+
+    def equity(self, hand, board, n_opp) -> float:
+        key = (tuple(int(c) for c in hand), tuple(int(c) for c in board), n_opp)
+        if key in self._cache:
+            self._cache_hits += 1
+            return self._cache[key]
+        # Rng.child labels must be flat ints (SeedSequence rejects nested
+        # sequences), so the (hand, board, n_opp) key is flattened. Hand is
+        # always 2 cards and board length is fixed per game state, making the
+        # flattening injective: each state gets its own deterministic stream.
+        eq = calc_equity(hand, board, n_opp,
+                         self.rng.child(*key[0], *key[1], key[2]),
+                         self.config.mc_iterations)
+        self._cache[key] = eq
+        return eq
+
+    def pot_odds(self) -> float:
+        """Required winning share for a break-even call (doc §5 input)."""
+        denom = self.pot + self.to_call
+        return 0.0 if denom == 0 else self.to_call / denom
