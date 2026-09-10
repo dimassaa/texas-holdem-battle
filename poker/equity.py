@@ -49,3 +49,16 @@ def start_hand_type(hand) -> int:
     a, b = int(hand[0]), int(hand[1])
     suited = 1 if suit_of(a) == suit_of(b) else 0
     return hand_type_index(rank_of(a), rank_of(b), suited)
+
+
+def deal_permutations(rng, pool: np.ndarray, n: int, k: int) -> np.ndarray:
+    """Draw n independent permutations of `pool` and keep the first k each.
+
+    Implemented with stable argsort over uniform keys (one row per draw), which
+    is fully deterministic for a fixed Rng stream and avoids the placeholder of
+    replace=False (not available vectorized). n*len(pool) entries in memory;
+    for MC sizing (n=400, len<50) that is negligible.
+    """
+    keys = rng.random((n, len(pool)))
+    order = np.argsort(keys, axis=1, kind="stable")
+    return pool[order[:, :k]]
