@@ -305,7 +305,7 @@ git add poker/game.py poker/player.py tests/test_game_state.py && git commit -m 
 """Betting-round loop: staging, capping, all-in recognition, reopen rule."""
 import numpy as np
 
-from poker.actions import BET, CALL, CHECK, FOLD, RAISE
+from poker.actions import ALLIN, BET, CALL, CHECK, FOLD, RAISE
 from poker.config import Config
 from poker.game import GameState, max_raise_amount, run_betting_round, starting_bets
 from poker.player import Player
@@ -368,7 +368,7 @@ Expected: `ModuleNotFoundError: run_betting_round`
 
 - [ ] **Step 3: Implement the betting-round loop**
 
-Append to `poker/game.py` exactly this code (single authoritative formulation):
+Append to `poker/game.py` exactly this code (single authoritative formulation). The loop body uses the bare action constants, so add `from poker.actions import ALLIN, BET, CALL, CHECK, FOLD, RAISE` to the imports at the top of the file:
 ```python
 def _setting_first_actor(state: "GameState") -> int:
     """Index of the first actor for this street.
@@ -519,6 +519,7 @@ lap counters — reason about it before changing it.
 ```python
 """Side-pot construction and payout against the conservation invariants."""
 import numpy as np
+import pytest
 from poker.config import Config
 from poker.game import build_side_pots, pay_out
 from poker.player import Player
@@ -629,8 +630,12 @@ def build_side_pots(players) -> list[SidePot]:
         else:
             dead += layer
         prev = level
-    if dead:
+    if dead and pots:
         pots[-1] = SidePot(amount=pots[-1].amount + dead, eligible=pots[-1].eligible)
+    elif dead:
+        # Everyone folded: there is no live pot, but the dead chips must still
+        # be preserved so amounts sum to total contributions (conservation).
+        pots = [SidePot(amount=dead, eligible=tuple())]
     return pots or [SidePot(0, tuple())]
 
 
@@ -743,7 +748,7 @@ Expected: `ModuleNotFoundError: run_hand`
 
 - [ ] **Step 3: Implement `HandResult`, `deal_hole`, and `run_hand`**
 
-Append to `poker/game.py` exactly this code (single authoritative formulation):
+Append to `poker/game.py` exactly this code (single authoritative formulation). The three helpers used below already live elsewhere: `deck = shuffle_deck(rng, new_deck())` needs `from poker.card import new_deck, shuffle_deck`, and the showdown needs `from poker.hand_evaluator import hand_score` — add these imports to the top of the file alongside the existing `Config`/`Player` imports.
 ```python
 @dataclass
 class HandResult:
@@ -829,7 +834,17 @@ def run_hand(players, dealer_pos, rng, config, actions_override=None):
         # Uncontested pot: the lone survivor takes everything already in.
         winner = survivors[0]
         players[winner].stack += state.pot + sum(state.round_bets.values())
-        actions_log.append({"round": state.round_idx, "pos": list(winner),
+        actions_log.append({"round": state.round_idx, "pos": [winner],
+                            "kind": "showdown", "amount": state.pot,
+                            "winners": (winner,), "board": state.board.tolist()})
+    elif len(survivors) == 0:
+        # Degenerate scripted hand: every player folded, so nobody remains to
+        # beat. Award the blinds to the big blind (last unraised seat) — the
+        # same ruling the lone-survivor branch produces when the BB is the last
+        # one standing (test_fold_to_big_blind pins net [-1, +1, ...]).
+        winner = (state.dealer_pos + 1) % len(players)
+        players[winner].stack += state.pot + sum(state.round_bets.values())
+        actions_log.append({"round": state.round_idx, "pos": [winner],
                             "kind": "showdown", "amount": state.pot,
                             "winners": (winner,), "board": state.board.tolist()})
     else:
