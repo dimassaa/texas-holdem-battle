@@ -180,19 +180,28 @@ def bet_size(state, idx, fraction, min_bet) -> int:
 
 
 def raise_size(state, idx, desired) -> int:
-    """Total wager for a raise that the engine will always accept as legal.
+    """Total wager for a raise the engine always accepts as legal.
 
-    The engine asserts gross = amount - round_bets[actor] >= last_full_raise
-    (game.py). A fixed 3/4bb target under-shoots that increment from any seat
-    with chips already committed this round (the BB re-raising, or anyone who
-    called and then pops again), causing an engine AssertionError — the crash
-    the Task-4.4/4.5 legality fixes only partially covered. Flooring the wager
-    at own + to_call + last_full_raise makes gross exactly to_call + increment,
-    which is legal and still a genuine raise from any seat geometry.
+    The engine asserts gross == amount - round_bets[actor] >= last_full_raise
+    (game.py:192). A fixed 3/4bb target under-shoots that increment from any
+    seat with chips already committed this round (the BB re-raising, or anyone
+    who called and then pops again), causing an engine AssertionError — the
+    crash the Task-4.4/4.5 legality fixes only partially covered. Flooring the
+    wager at own + to_call + last_full_raise makes gross exactly to_call +
+    increment, which is legal and still a genuine raise from any seat geometry.
+
+    The wager is also capped at own + stack. A raise to exactly your stack is
+    the all-in wager the engine's `gross == p.stack` minimum-raise override
+    (game.py:192) explicitly accepts. Without the cap a short stack raising a
+    large open bet would emit a total wager above its stack and trip
+    assert gross <= p.stack (game.py:191) before the engine can clamp it.
     """
     own = state.round_bets.get(idx, 0)
     legal_min = own + state.to_call(idx) + state.last_full_raise
-    return max(int(desired), legal_min)
+    # Cap at all-in: own + stack is the most this seat can put in; gross then
+    # equals the full stack, which the engine's `gross == p.stack` escape
+    # (game.py:192) accepts regardless of the street increment.
+    return min(max(int(desired), legal_min), own + state.players[idx].stack)
 
 
 @_register
@@ -416,11 +425,17 @@ class MathematicianStrategy(Strategy):
     # off-table fallback so the contract test still sees a valid frozenset.
     _play_range = TIGHT_RANGE
 
-    def _preflop_action(self, player, state, idx, provider):
-        # Entry is by equity-per-field, not a hand class: below 20% vs the
-        # opponents the flop is rarely paid off even for free (§5.5).
+    def _ev_action(self, player, state, idx, provider, entry_floor=0.0):
+        """Shared equity-vs-pot-odds decision for the preflop and postflop paths.
+
+        `entry_floor` is the minimum equity a street requires before any
+        investment (preflop passes _FOLD_EQUITY; postflop passes 0.0). The
+        preflop caller gates below the floor; every legality rule is evaluated
+        here so the two paths cannot silently drift apart (Task 5.2 Adaptive
+        would otherwise triple this block).
+        """
         eq = provider.equity(player.hole, state.board, state.num_opponents(idx))
-        if eq < self._FOLD_EQUITY:
+        if eq < entry_floor:
             return Action(FOLD, 0)
         to_call = provider.to_call
         if to_call == 0:
@@ -444,22 +459,15 @@ class MathematicianStrategy(Strategy):
             return Action(CALL, min(player.stack, to_call))
         return Action(FOLD, 0)
 
+    def _preflop_action(self, player, state, idx, provider):
+        # Entry is by equity-per-field, not a hand class: below 20% vs the
+        # opponents the flop is rarely paid off even for free (§5.5).
+        return self._ev_action(player, state, idx, provider, entry_floor=self._FOLD_EQUITY)
+
     def act(self, player, state, idx, provider, rng):
         if state.round_idx == 0:
             return self._preflop_action(player, state, idx, provider)
-        eq = provider.equity(player.hole, state.board, state.num_opponents(idx))
-        to_call = provider.to_call
-        if to_call == 0:
-            if eq >= self._BET_THRESHOLD and state.can_raise(idx) and player.stack >= state.config.min_bet:
-                return Action(BET, bet_size(state, idx, 0.6, state.config.min_bet))
-            return Action(CHECK, 0)
-        pot_odds = provider.pot_odds()
-        if eq >= self._RAISE_SURPLUS * pot_odds and state.can_raise(idx) and state.to_call(idx) > 0:
-            return Action(RAISE, raise_size(state, idx,
-                                            bet_size(state, idx, 0.66, state.config.min_bet)))
-        if eq >= pot_odds:
-            return Action(CALL, min(player.stack, to_call))
-        return Action(FOLD, 0)
+        return self._ev_action(player, state, idx, provider)
 
 
 def _wire_ranges_from_table(path: str) -> None:
