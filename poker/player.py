@@ -7,6 +7,7 @@ this keeps every strategy's decisions reproducible and its stochastic inputs
 """
 
 import os
+from collections import deque
 
 from dataclasses import dataclass, field
 
@@ -470,6 +471,298 @@ class MathematicianStrategy(Strategy):
         return self._ev_action(player, state, idx, provider)
 
 
+# ---- Task 5.2 shared helpers: window aggregation and table reads ------------
+
+_PREFLOP_ECON = None
+
+
+def _preflop_table():
+    """Lazily load the Stage-03 preflop equity table (169 x n).
+
+    Guarantees the strategy never crashes when the table file is absent
+    (pre-table test environments, first run): callers fall back to neutral.
+    """
+    global _PREFLOP_ECON
+    if _PREFLOP_ECON is None:
+        import os
+        from poker.config import Config
+        path = Config().preflop_table_path
+        if os.path.exists(path):
+            _PREFLOP_ECON = np.load(path)
+    return _PREFLOP_ECON
+
+
+def _range_share(range_set):
+    """Share of the 1326-combo universe covered by a 169-class range."""
+    if not range_set:
+        return 0.0
+    return sum(combo_weight(t) for t in range_set) / 1326.0
+
+
+def _aggregate_window(window):
+    """Roll up per-seat stats over the window: fold-to-raise, cbet, aggression.
+
+    Accepts real hand summaries (Task 5.4 producer keys: faces_raise,
+    folds_to_raise, cbets, cbet_chances, agg_actions, calls, folds, plays,
+    raises) AND synthetic window-dump rows that carry only the decision counts.
+    Returns {seat: {hands, fold_to_raise, cbet, aggression, call_share,
+    decision_fold}}; None means insufficient evidence (neutral cold-start).
+    """
+    agg = {}
+    for summary in window:
+        s = summary.get("seat")
+        if s is None:
+            continue
+        d = agg.setdefault(s, {"hands": 0, "folds_to_raise": 0, "faces_raise": 0,
+                               "cbets": 0, "cbet_chances": 0, "agg_actions": 0,
+                               "calls": 0, "raises": 0, "folds": 0, "plays": 0})
+        d["hands"] += 1
+        d["faces_raise"] += summary.get("faces_raise", 0)
+        d["folds_to_raise"] += summary.get("folds_to_raise", 0)
+        d["cbets"] += summary.get("cbets", 0)
+        d["cbet_chances"] += summary.get("cbet_chances", 0)
+        d["agg_actions"] += summary.get("agg_actions", 0)
+        d["calls"] += summary.get("calls", 0)
+        d["raises"] += summary.get("raises", 0)
+        d["folds"] += summary.get("folds", 0)
+        d["plays"] += summary.get("plays", 0)
+    out = {}
+    for seat, d in agg.items():
+        decided = d["calls"] + d["raises"] + d["folds"]
+        out[seat] = {
+            "hands": d["hands"],
+            "fold_to_raise": (d["folds_to_raise"] / d["faces_raise"]) if d["faces_raise"] else None,
+            "cbet": (d["cbets"] / d["cbet_chances"]) if d["cbet_chances"] else None,
+            "aggression": (d["agg_actions"] / d["calls"]) if d["calls"] else None,
+            "call_share": (d["calls"] / decided) if decided else None,
+            "decision_fold": (d["folds"] / d["plays"]) if d["plays"] else None,
+        }
+    return out
+
+
+def _table_reads(agg):
+    """Map table reads to range/steal adjustments (doc §5.6 quantitative form).
+
+    fold_share  = mean opponents' fold_to_raise, else mean decision_fold,
+                  else neutral 0.5 (cold-start).
+    call_share  = mean opponents' call_share (None => neutral 0.5).
+    Regimes: fold-heavy table => steals profitable, widen play range and raise.
+    Loose-calling table (calls >= 70% of decisions) => tighten to value hands.
+    Missing table => never crash; play the neutral ranges.
+
+    NOTE: the cbet/aggression aggregates (computed in _aggregate_window) ARE
+    exposed via AdaptiveStrategy.stats() for Stage-06 analysis, but the DECISION
+    path below reacts only through fold_share. Callers/aggressives keep an
+    opponent's fold_share low, sorting the table into the tighten branch — the
+    §5.6 "plays tighter vs aggressive opponents" requirement routes through the
+    fold-rate signal, not the raw aggression metric.
+    """
+    ftr = [v["fold_to_raise"] for v in agg.values() if v["fold_to_raise"] is not None]
+    if ftr:
+        fold_share = float(np.mean(ftr))
+    else:
+        dfold = [v["decision_fold"] for v in agg.values() if v["decision_fold"] is not None]
+        fold_share = float(np.mean(dfold)) if dfold else 0.5
+    cs = [v["call_share"] for v in agg.values() if v["call_share"] is not None]
+    call_share = float(np.mean(cs)) if cs else 0.5
+    table = _preflop_table()
+    if table is None:
+        # Pre-table environment: neutral ranges (two tight-tier pairs / AK).
+        return (_type_set(pairs=(14, 13, 12, 11)),
+                _type_set(pairs=(14, 13, 12), suited=((14, 13),), offsuit=((14, 13),)),
+                1.0)
+    if fold_share > 0.60:
+        # Fold-heavy: steals profitable, widen play AND raise ranges.
+        return (ranked_types(table, 0.20) | ranked_types(table, 0.30),
+                ranked_types(table, 0.30), 1.4)
+    if fold_share < 0.35 or call_share >= 0.70:
+        # Rare folds or loose callers: bets get called, tighten to value hands.
+        return ranked_types(table, 0.15), ranked_types(table, 0.10), 0.7
+    return ranked_types(table, 0.20), ranked_types(table, 0.15), 1.0
+
+
+@_register
+class AdaptiveStrategy(Strategy):
+    """Learns opponent tendencies from public action history and adjusts.
+
+    Statistics are windowed (config.adaptive_window hands; risk §10) so the
+    strategy reacts to recent behavior, not ancient history. Thresholds refresh
+    at config.adaptive_adjust_every hands. All reads are from observable
+    actions only (doc §1 limitation 2) — never hole cards or strategy identity.
+
+    The §5.6 regimes land on three knobs: fold-heavy opponents widen the play
+    and raise ranges (to top-30%) AND raise steal sizing; loose callers tighten
+    everything to value hands (top-15%). Postflop, higher opponent fold-to-raise
+    lowers the equity a continuation bet needs, so c-bets fire more often into
+    tight folders and dry up against callers. "Play tighter vs aggressive
+    opponents" is realized preflop: opponents that raise/call instead of folding
+    keep fold_share low, sorting the table into the tighten branch.
+    """
+
+    name = "Adaptive"
+    _FLOORS = {1: 0.45, 2: 0.50, 3: 0.55}
+    # Class-level neutral ranges (deviation from the plan literal, which kept
+    # only per-instance attrs and therefore crashed the module-level RANGES
+    # dict below with AttributeError on import): the class must carry a real
+    # frozenset even pre-table, and _wire_ranges_from_table re-wires _play_range
+    # to table top-20% in normal runs. The defaults mirror _table_reads' no-
+    # table branch so a fresh clone behaves exactly like a cold session.
+    _play_range = _type_set(pairs=(14, 13, 12, 11))                            # ~1.8% neutral (JJ+)
+    _raise_range = _type_set(pairs=(14, 13, 12), suited=((14, 13),), offsuit=((14, 13),))  # QQ+/AK
+    _steal_scale = 1.0
+
+    def __init__(self, memory=None, adjust_every=None):
+        self.memory = memory or Config().adaptive_window
+        self.adjust_every = adjust_every or Config().adaptive_adjust_every
+        self.hands_seen = 0
+        self._window = deque(maxlen=self.memory)   # list of per-hand summaries
+        # Range caches: start as the class-level defaults (cold-start / pre-table
+        # neutral) and _refresh_ranges_if_due overwrites them on each boundary.
+        # One source of truth per range — no class-vs-instance None shadowing,
+        # so act() can never decide from a missing range.
+        self._play_range = type(self)._play_range
+        self._raise_range = type(self)._raise_range
+        self._steal_scale = 1.0
+
+    # ---- public interface used by the simulator ---------------------------
+    def observe(self, hand_summary: dict) -> None:
+        """Append one hand's PUBLIC action summary (see Task 5.4 producer)."""
+        self._window.append(hand_summary)
+        self.hands_seen += 1
+
+    def stats(self):
+        """Aggregate the window into per-opponent stats dicts."""
+        return _aggregate_window(self._window)
+
+    def window_dump(self, summaries):
+        """Test harness: load synthetic hand summaries directly."""
+        self._window = deque(summaries, maxlen=self.memory)
+
+    @property
+    def play_share(self):
+        """Share (of the 1326-combo universe) of the current adjusted play range.
+
+        PROSPECTIVE read: recomputed from the live window, i.e. what the next
+        _refresh_ranges_if_due() boundary would cache — NOT necessarily the
+        ranges act() is currently using, which update only on refresh
+        boundaries and sit in _play_range. Tests feed synthetic tables through
+        `window_dump` and assert the resulting tightness/wideness.
+        """
+        play_range, _, _ = _table_reads(_aggregate_window(self._window))
+        return _range_share(play_range)
+
+    @property
+    def raise_share(self):
+        """Share of the 1326-combo universe of the current adjusted raise range.
+
+        PROSPECTIVE read from the live window (what the next refresh boundary
+        would set), not the cached _raise_range act() is currently using.
+        """
+        _, raise_range, _ = _table_reads(_aggregate_window(self._window))
+        return _range_share(raise_range)
+
+    # ---- decision overrides ----------------------------------------------
+    def _refresh_ranges_if_due(self):
+        """Recompute the cached ranges whenever the hand counter hits a refresh
+        boundary.
+
+        Deviation from the plan literal, whose one-shot `_ranges_dirty` flag
+        froze the ranges at hand-0 cold reads forever — a strategy that never
+        re-reads the table can not adapt (defeats §5.6). hands_seen=0 counts
+        as a boundary so a fresh session refreshes immediately with the empty
+        window, which aggregates to the neutral cold-start read.
+        """
+        if self.hands_seen % self.adjust_every != 0:
+            return
+        self._play_range, self._raise_range, self._steal_scale = _table_reads(
+            _aggregate_window(self._window))
+
+    def _fold_bias(self, hero_seat):
+        """Mean fold-to-raise among OPPONENTS in the window; excludes the hero's
+        own seat because the Task-5.4 simulator feeds each Adaptive brain its
+        own summaries too.
+
+        Falls back to opponents' decision-fold (folds/plays) when no raise-facing
+        evidence exists, then to a neutral 0.5. Drives the postflop c-bet gate:
+        the higher the table's fold rate, the more a continuation bluff folds out.
+        """
+        agg = _aggregate_window(self._window)
+        ftr = [v["fold_to_raise"] for seat, v in agg.items()
+               if seat != hero_seat and v["fold_to_raise"] is not None]
+        if ftr:
+            return float(np.mean(ftr))
+        dfold = [v["decision_fold"] for seat, v in agg.items()
+                 if seat != hero_seat and v["decision_fold"] is not None]
+        if dfold:
+            return float(np.mean(dfold))
+        return 0.5
+
+    def _preflop_action(self, player, state, idx, provider):
+        from poker.equity import start_hand_type
+        htype = start_hand_type(player.hole)
+        # Caches are always populated (init copies the class defaults); the
+        # first _refresh_ranges_if_due on hands_seen=0 overwrites them right
+        # before the opening hand is decided.
+        play_range = self._play_range
+        raise_range = self._raise_range
+        steal_scale = self._steal_scale
+        if htype not in play_range:
+            return Action(FOLD, 0)
+        pos = relative_position(state, idx)
+        to_call = state.to_call(idx)
+        # Any in-range button/cutoff hand steals (no dedicated steal set — that
+        # breadth already adapts through play_range); _steal_scale sizes it:
+        # ~5.6bb on fold-heavy tables, ~2.8bb against loose callers (§5.6:
+        # "steals get bigger" / tighter).
+        steal = pos == "late"
+        raise_now = (htype in raise_range or steal) and state.can_raise(idx)
+        # Engine legality (game.py:189): RAISE requires owed > 0 — gate on
+        # to_call > 0. raise_size floors the wager at own + to_call +
+        # last_full_raise so gross clears the street increment from any
+        # committed seat (the BB re-raising, or a caller popping again).
+        if raise_now and state.to_call(idx) > 0:
+            base = max(state.config.bb, (3 if not steal else 4 * steal_scale) * state.config.bb)
+            return Action(RAISE, raise_size(state, idx, base))
+        return Action(CALL, to_call) if to_call <= player.stack else Action(FOLD, 0)
+
+    def act(self, player, state, idx, provider, rng):
+        self._refresh_ranges_if_due()
+        if state.round_idx == 0:
+            return self._preflop_action(player, state, idx, provider)
+        equity = provider.equity(player.hole, state.board, state.num_opponents(idx))
+        to_call = state.to_call(idx)
+        is_aggressor = getattr(state, "preflop_raise_by", None) == idx
+        if to_call == 0:
+            # Both BET branches below need a legal wager (engine asserts
+            # paid >= min_bet, game.py:185) and an aggression slot free.
+            if not state.can_raise(idx) or player.stack < state.config.min_bet:
+                return Action(CHECK, 0)
+            if is_aggressor:
+                # C-bet gate scaled inversely to the table's fold-to-raise
+                # (§5.6): high fold_bias (tight folders) drops the equity a
+                # continuation bet needs toward the 0.45 floor, so the c-bet
+                # fires more often; low fold_bias (callers/aggressives) pushes
+                # the bar to 0.60 and the semi-bluff dries up. This is the
+                # bluff/fold-tight tradeoff reacting to the table.
+                fold_bias = self._fold_bias(idx)
+                if equity >= max(0.45, 0.60 - 0.25 * fold_bias):
+                    return Action(BET, bet_size(state, idx, 0.66, state.config.min_bet))
+                return Action(CHECK, 0)
+            if equity >= 0.5:
+                # Not the aggressor: value-bet only a made hand.
+                return Action(BET, bet_size(state, idx, 0.6, state.config.min_bet))
+            return Action(CHECK, 0)
+        # Facing a bet: mirror the Aggressive equity-raise/call/fold line.
+        req = required_equity(provider, state.num_opponents(idx),
+                              self._FLOORS[state.round_idx], style_factor=1.05)
+        if equity >= req * 1.2 and state.can_raise(idx) and state.to_call(idx) > 0:
+            return Action(RAISE, raise_size(state, idx,
+                                            bet_size(state, idx, 0.66, state.config.min_bet)))
+        if equity >= req:
+            return Action(CALL, min(player.stack, to_call))
+        return Action(FOLD, 0)
+
+
 def _wire_ranges_from_table(path: str) -> None:
     """Attach equity-ranked ranges to Aggressive/Passive/Loose from the saved
     preflop table (Stage 03). Deterministic; runs once at import time."""
@@ -482,6 +775,7 @@ def _wire_ranges_from_table(path: str) -> None:
     AggressiveStrategy._raise_range = top20
     PassiveStrategy._play_range = top25
     MathematicianStrategy._play_range = top25  # its ~top-20-25% entry band (§5.5)
+    AdaptiveStrategy._play_range = top20       # its §5.6 base preflop range
     PassiveStrategy._raise_range = _type_set(
         pairs=(14, 13, 12), suited=((14, 13),), offsuit=((14, 13),))
     AggressiveStrategy._steal_range = top20 | _type_set(
@@ -505,4 +799,5 @@ RANGES = {
     "Aggressive": AggressiveStrategy._play_range,
     "Passive": PassiveStrategy._play_range,
     "Mathematician": MathematicianStrategy._play_range,
+    "Adaptive": AdaptiveStrategy._play_range,
 }
