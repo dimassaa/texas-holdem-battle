@@ -388,6 +388,80 @@ class AggressiveStrategy(Strategy):
         return Action(FOLD, 0)
 
 
+@_register
+class MathematicianStrategy(Strategy):
+    """Strict EV line: every street is equity vs pot odds (plan §5.5).
+
+    Call iff equity >= pot odds; fold otherwise; raise only when equity beats
+    pot odds by a 1.15x surplus (the raise is +EV); bet 50-75% pot only with a
+    large equity edge and an unopened pot. Preflop additionally folds below
+    20% equity (the ~top-20-25% entry band) so trash never invests.
+
+    The plan literal keyed its branch on `state.to_call(idx)`, but its own
+    stub tests inject a provider whose to_call differs from the state's empty
+    round_bets (test make() never sets them) — and the engine builds the
+    provider FROM state (game.py:165), so `provider.to_call` is the same value
+    in production and the only one a stub test can see. Decisions therefore
+    read decision inputs from the provider, not raw state.
+    """
+
+    name = "Mathematician"
+    _BET_THRESHOLD = 0.60      # equity edge required to open an unbet pot
+    _RAISE_SURPLUS = 1.15      # equity must beat pot odds by this factor to raise
+    _FOLD_EQUITY = 0.20        # preflop: below ~20% equity no street is worth it
+    # Contract-only range (stage04.md:19 keeps RANGES 1:1 with STRATEGIES):
+    # the Mathematician enters on equity, not a discrete list, so this is the
+    # ~top-25% stand-in the plan's docstring quotes, table-wired when present
+    # (see _wire_ranges_from_table) with TIGHT_RANGE as a conservative
+    # off-table fallback so the contract test still sees a valid frozenset.
+    _play_range = TIGHT_RANGE
+
+    def _preflop_action(self, player, state, idx, provider):
+        # Entry is by equity-per-field, not a hand class: below 20% vs the
+        # opponents the flop is rarely paid off even for free (§5.5).
+        eq = provider.equity(player.hole, state.board, state.num_opponents(idx))
+        if eq < self._FOLD_EQUITY:
+            return Action(FOLD, 0)
+        to_call = provider.to_call
+        if to_call == 0:
+            # Unopened pot: value-bet only with a big edge AND a stack that
+            # covers the minimum wager — the engine caps paid at min(stack,
+            # max_raise_amount) and asserts paid >= min_bet (game.py:185).
+            if eq >= self._BET_THRESHOLD and state.can_raise(idx) and player.stack >= state.config.min_bet:
+                return Action(BET, bet_size(state, idx, 0.6, state.config.min_bet))
+            return Action(CHECK, 0)
+        pot_odds = provider.pot_odds()
+        # Engine legality (game.py:189): RAISE needs owed > 0. The plan's
+        # to_call==0 early-return already guards this; the explicit
+        # state.to_call(idx) > 0 gate makes the invariant hold even if the
+        # branches are ever reordered. raise_size floors the wager at
+        # own + to_call + last_full_raise so gross clears the street
+        # increment from any committed seat.
+        if eq >= self._RAISE_SURPLUS * pot_odds and state.can_raise(idx) and state.to_call(idx) > 0:
+            return Action(RAISE, raise_size(state, idx,
+                                            bet_size(state, idx, 0.66, state.config.min_bet)))
+        if eq >= pot_odds:
+            return Action(CALL, min(player.stack, to_call))
+        return Action(FOLD, 0)
+
+    def act(self, player, state, idx, provider, rng):
+        if state.round_idx == 0:
+            return self._preflop_action(player, state, idx, provider)
+        eq = provider.equity(player.hole, state.board, state.num_opponents(idx))
+        to_call = provider.to_call
+        if to_call == 0:
+            if eq >= self._BET_THRESHOLD and state.can_raise(idx) and player.stack >= state.config.min_bet:
+                return Action(BET, bet_size(state, idx, 0.6, state.config.min_bet))
+            return Action(CHECK, 0)
+        pot_odds = provider.pot_odds()
+        if eq >= self._RAISE_SURPLUS * pot_odds and state.can_raise(idx) and state.to_call(idx) > 0:
+            return Action(RAISE, raise_size(state, idx,
+                                            bet_size(state, idx, 0.66, state.config.min_bet)))
+        if eq >= pot_odds:
+            return Action(CALL, min(player.stack, to_call))
+        return Action(FOLD, 0)
+
+
 def _wire_ranges_from_table(path: str) -> None:
     """Attach equity-ranked ranges to Aggressive/Passive/Loose from the saved
     preflop table (Stage 03). Deterministic; runs once at import time."""
@@ -399,6 +473,7 @@ def _wire_ranges_from_table(path: str) -> None:
     AggressiveStrategy._play_range = top30
     AggressiveStrategy._raise_range = top20
     PassiveStrategy._play_range = top25
+    MathematicianStrategy._play_range = top25  # its ~top-20-25% entry band (§5.5)
     PassiveStrategy._raise_range = _type_set(
         pairs=(14, 13, 12), suited=((14, 13),), offsuit=((14, 13),))
     AggressiveStrategy._steal_range = top20 | _type_set(
@@ -421,4 +496,5 @@ RANGES = {
     "Loose": LOOSE_RANGE,
     "Aggressive": AggressiveStrategy._play_range,
     "Passive": PassiveStrategy._play_range,
+    "Mathematician": MathematicianStrategy._play_range,
 }
