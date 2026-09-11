@@ -132,3 +132,30 @@ STRATEGIES = {}
 def _register(cls):
     STRATEGIES[cls.name] = cls
     return cls
+
+
+def required_equity(provider, n_opp, str_floor, style_factor=1.0, floor_only_heads_up=True):
+    """Minimum equity a strategy requires to continue.
+
+    Multiway (approved decision): pot odds, scaled by the strategy's calling
+    style factor — the pot odds already encode opponents + bet size.
+    Heads-up: at least the street's Table-2 threshold floor (floors keep the
+    doc's quoted behavior vs a single random opponent).
+    """
+    if n_opp > 1:
+        return provider.pot_odds() * style_factor
+    return max(provider.pot_odds(), str_floor)
+
+
+def pot_total(state) -> int:
+    """Effective pot this actor faces = prior streets + this round's bets."""
+    return state.pot + sum(state.round_bets.values())
+
+
+def bet_size(state, idx, fraction, min_bet) -> int:
+    """Round a fractional-pot bet into a legal, capped chip amount."""
+    # Floor the raw wager at 1 chip so a tiny-pot bet never rounds to zero.
+    raw = max(1.0, fraction * pot_total(state))
+    size = int(round(raw))
+    from poker.game import max_raise_amount  # local import breaks the game<->player cycle
+    return min(max_raise_amount(state, idx), max(min_bet, size))
