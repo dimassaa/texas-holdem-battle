@@ -6,6 +6,8 @@ this keeps every strategy's decisions reproducible and its stochastic inputs
 (Monte Carlo equity) bounded to the provider.
 """
 
+import os
+
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -277,3 +279,94 @@ class PassiveStrategy(Strategy):
         if eq >= req * 0.95:   # documented slight looseness of passive callers
             return Action(CALL, min(player.stack, state.to_call(idx)))
         return Action(FOLD, 0)
+
+
+@_register
+class AggressiveStrategy(Strategy):
+    """Frequent aggressive actions, continuation bets, equity-raise postflop.
+
+    The c-bet-with-air and in-position steal are deliberate SEMI-BLUFFS —
+    documented relaxation of the project's no-bluff limitation (approved
+    decision) so this strategy stays distinct from Passive. They never bloat
+    the action log; they are plain BET/RAISE records analyzed in Stage 06.
+    """
+
+    name = "Aggressive"
+    _FLOORS = {1: 0.45, 2: 0.50, 3: 0.55}
+    # Conservative class-level defaults so preflop paths work even when the
+    # Stage-03 table file is absent; Task 4.6 re-wires these from ranked_types.
+    _play_range = _type_set(
+        pairs=(14, 13, 12, 11, 10, 9, 8),
+        suited=((14, 13), (13, 12), (12, 11), (11, 10), (10, 9), (9, 8), (8, 7)),
+        offsuit=((14, 13), (13, 12), (12, 11), (11, 10), (10, 9), (9, 8)))
+    _raise_range = _type_set(pairs=(14, 13, 12), suited=((14, 13),), offsuit=((14, 13),))
+    _steal_range = _type_set(suited=((12, 11), (11, 10), (10, 9)), offsuit=((12, 11), (11, 10)))
+
+    def _preflop_action(self, player, state, idx, provider):
+        from poker.equity import start_hand_type
+        htype = start_hand_type(player.hole)
+        in_range = htype in self._play_range
+        if not in_range:
+            return Action(FOLD, 0)
+        to_call = state.to_call(idx)
+        pos = relative_position(state, idx)
+        steal = pos == "late" and htype in self._steal_range
+        raise_now = (htype in self._raise_range or steal) and state.can_raise(idx)
+        # Engine-legality (user-approved, mirrors Task 4.4): RAISE requires net
+        # to_call>0 (game.py:168, owed==0 crash) and the engine computes the
+        # wager's increment as amount MINUS the actor's own chips already in
+        # (game.py:169). A fixed 3/4bb re-raise undershoots that increment from
+        # any seat with chips committed (BB/limper), so target open_bet + one bb
+        # and only raise when there is a net bet outstanding.
+        if raise_now and state.to_call(idx) > 0:
+            base = max(state.config.bb, (3 if not steal else 4) * state.config.bb)
+            own = state.round_bets.get(idx, 0)
+            size = max(base, state.to_call(idx) + own + state.config.bb)
+            return Action(RAISE, size)
+        return Action(CALL, to_call) if to_call <= player.stack else Action(FOLD, 0)
+
+    def act(self, player, state, idx, provider, rng):
+        if state.round_idx == 0:
+            return self._preflop_action(player, state, idx, provider)
+        equity = provider.equity(player.hole, state.board, state.num_opponents(idx))
+        to_call = state.to_call(idx)
+        is_aggressor = getattr(state, "preflop_raise_by", None) == idx
+        if to_call == 0:
+            if is_aggressor and state.can_raise(idx):
+                # continuation bet — fires on every unbet flop/turn/river, even
+                # with air (documented semi-bluff, plan §5.3).
+                return Action(BET, bet_size(state, idx, 0.66, state.config.min_bet))
+            if equity >= 0.5 and state.can_raise(idx):
+                return Action(BET, bet_size(state, idx, 0.6, state.config.min_bet))
+            return Action(CHECK, 0)
+        # facing a bet: aggressive prefers raising strong equity over calling
+        req = required_equity(provider, state.num_opponents(idx),
+                              self._FLOORS[state.round_idx], style_factor=1.05)
+        if equity >= req * 1.2 and state.can_raise(idx):
+            return Action(RAISE, bet_size(state, idx, 0.66, state.config.min_bet))
+        if equity >= req:
+            return Action(CALL, min(player.stack, to_call))
+        return Action(FOLD, 0)
+
+
+def _wire_ranges_from_table(path: str) -> None:
+    """Attach equity-ranked ranges to Aggressive/Passive/Loose from the saved
+    preflop table (Stage 03). Deterministic; runs once at import time."""
+    import numpy as np
+    table = np.load(path)
+    top20 = ranked_types(table, 0.20)
+    top25 = ranked_types(table, 0.25)
+    top30 = ranked_types(table, 0.30)
+    top10 = ranked_types(table, 0.10)
+    AggressiveStrategy._play_range = top30
+    AggressiveStrategy._raise_range = top20
+    PassiveStrategy._play_range = top25
+    PassiveStrategy._raise_range = _type_set(
+        pairs=(14, 13, 12), suited=((14, 13),), offsuit=((14, 13),))
+    AggressiveStrategy._steal_range = top20 | _type_set(
+        suited=((12, 11), (11, 10), (10, 9), (9, 8), (8, 7), (7, 6), (6, 5)))
+    LooseStrategy._top10 = top10
+
+
+if os.path.exists(Config().preflop_table_path):
+    _wire_ranges_from_table(Config().preflop_table_path)
