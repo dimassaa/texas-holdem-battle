@@ -8,7 +8,7 @@ so that every (rank_a, rank_b, suited) mapping lands in 0..168 bijectively.
 """
 import numpy as np
 
-from poker.card import rank_of, suit_of
+from poker.card import card_id, rank_of, suit_of
 from poker.hand_evaluator import score_batch
 from poker.rng import Rng
 
@@ -191,3 +191,40 @@ def calc_equity_jit(hand, board, num_opponents, rng, mc_iterations, cache=None):
     if cache is not None:
         cache[key] = eq
     return float(eq)
+
+
+def _representative_for(index: int) -> np.ndarray:
+    """A deterministic concrete 2-card hand whose start-hand type is `index`.
+
+    Pair: (r,r) suited=0. Non-pair: (hi, lo) suited per class. The suits chosen
+    ensure the hand is internally distinct and dead cards are excluded by the
+    MC pool below.
+    """
+    for hi in range(2, 15):
+        for lo in range(2, hi + 1):
+            for suited in (0, 1):
+                if hand_type_index(hi, lo, suited) == index:
+                    if hi == lo:
+                        return np.array([card_id(hi, 0), card_id(hi, 1)], dtype=np.int32)
+                    if suited:
+                        return np.array([card_id(hi, 0), card_id(lo, 0)], dtype=np.int32)
+                    return np.array([card_id(hi, 0), card_id(lo, 1)], dtype=np.int32)
+    raise AssertionError(f"no hand for index {index}")
+
+
+def build_preflop_table(rng, iterations=40_000, num_players=6) -> np.ndarray:
+    """Compute equity of all 169 start-hand classes vs 1..5 random opponents.
+
+    Uses the identical Monte Carlo path as calc_equity (via calc_equity_jit,
+    the byte-identical numba fast path), so the number-dead-card semantics
+    (own two cards removed) are guaranteed by construction. Deterministic
+    for a fixed `rng`. Sizing: 169 * 5 opponent counts * iterations simulations,
+    fully vectorized; ~ minutes at default iterations on a laptop with numba.
+    """
+    table = np.empty((169, num_players - 1), dtype=np.float32)
+    for idx in range(169):
+        hand = _representative_for(idx)
+        for opp in range(1, num_players):
+            table[idx, opp - 1] = calc_equity_jit(hand, np.empty(0, dtype=np.int32), opp,
+                                                  rng.child(idx, opp), iterations)
+    return table
