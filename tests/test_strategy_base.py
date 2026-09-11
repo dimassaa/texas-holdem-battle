@@ -1,7 +1,7 @@
 """Strategy registry, positions, and range-combo accounting."""
 import numpy as np
 from poker.equity import hand_type_index
-from poker.player import STRATEGIES, combo_weight, relative_position, for_name
+from poker.player import STRATEGIES, RANGES, combo_weight, relative_position, for_name
 from poker.config import Config
 from poker.game import GameState
 from poker.player import Player
@@ -10,6 +10,18 @@ from poker.player import Player
 def test_registry_has_four_basic_strategies():
     assert {"Tight", "Loose", "Aggressive", "Passive"} <= set(STRATEGIES)
     assert for_name("Tight").name == "Tight"
+
+
+def test_ranges_contract_shape():
+    # Locked contract (stage04.md:19): RANGES[strategy] is a frozenset of
+    # hand-type indices, one entry per registered strategy. Stage 05 consumes
+    # exactly this — a shape break here is a contract break there.
+    assert set(RANGES) == set(STRATEGIES)
+    for name, rng in RANGES.items():
+        assert isinstance(rng, frozenset)
+        assert all(isinstance(i, int) and 0 <= i < 1820 for i in rng)
+    # Tight = narrowest, Loose = widest (audited percentages: 14.5% vs 39.7%).
+    assert len(RANGES["Tight"]) < len(RANGES["Loose"])
 
 
 def test_combo_weights_sum_to_1326():

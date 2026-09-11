@@ -408,3 +408,17 @@ def _wire_ranges_from_table(path: str) -> None:
 
 if os.path.exists(Config().preflop_table_path):
     _wire_ranges_from_table(Config().preflop_table_path)
+
+
+# Locked Stage-04 contract (stage04.md:19): RANGES[<strategy>] maps each
+# strategy's PLAY range to a frozenset of hand-type indices. Defined after
+# _wire_ranges_from_table so Aggressive/Passive expose their table-wired
+# top-X% sets (not the conservative pre-wiring defaults), while Tight/Loose
+# keep their audited literal constants. Stage-05 (adaptive, mathematician)
+# strategies consume this dict instead of reaching into private attrs.
+RANGES = {
+    "Tight": TIGHT_RANGE,
+    "Loose": LOOSE_RANGE,
+    "Aggressive": AggressiveStrategy._play_range,
+    "Passive": PassiveStrategy._play_range,
+}
