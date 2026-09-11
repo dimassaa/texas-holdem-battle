@@ -13,7 +13,8 @@ from poker.actions import ALLIN, BET, CALL, CHECK, FOLD, RAISE
 from poker.card import new_deck, shuffle_deck
 from poker.config import Config
 from poker.hand_evaluator import hand_score
-from poker.player import Player
+from poker.equity import EquityProvider
+from poker.player import Player, pot_total
 
 
 @dataclass
@@ -58,6 +59,7 @@ def starting_bets(state: GameState) -> None:
     sb_idx = state.dealer_pos
     bb_idx = (state.dealer_pos + 1) % len(state.players)
     state.round_bets = {}
+    state.preflop_raise_by = -1   # fresh aggressor tracker per preflop
     for idx, amt in ((sb_idx, state.config.sb), (bb_idx, state.config.bb)):
         paid = min(state.players[idx].stack, amt)
         state.players[idx].stack -= paid
@@ -100,7 +102,7 @@ def _round_finished(state: "GameState") -> bool:
     return True
 
 
-def run_betting_round(state: "GameState", actions_override=None) -> None:
+def run_betting_round(state: "GameState", actions_override=None, rng=None) -> None:
     """Execute one betting street with the full rule set.
 
     Reopen rule (doc requirement): a short all-in raise does not reopen players
@@ -114,7 +116,8 @@ def run_betting_round(state: "GameState", actions_override=None) -> None:
 
     `actions_override` is the Stage-02 test harness: {player_idx: (kind, amount)}
     consumed when set. Production passes None and strategies act via
-    `Player.brain.act(...)` (wired in Stage 04).
+    `Player.brain.act(...)` (wired in Stage 04); `rng` backs the per-decision
+    EquityProvider so every equity query is deterministic.
     """
     n = len(state.players)
     idx = _setting_first_actor(state)
@@ -146,7 +149,21 @@ def run_betting_round(state: "GameState", actions_override=None) -> None:
         if actions_override is not None:
             kind, amount = actions_override[idx]
         else:
-            kind, amount = p.act(state, idx)   # resolved in Stage 04
+            # Production branch (Stage 04): strategies act as pure functions.
+            # A fresh provider per decision keeps equity cache/MC streams
+            # short-lived and deterministic for a fixed (state, seed).
+            assert rng is not None, "production branch requires an rng"
+            assert p.brain is not None, f"{p.name} has no brain (Stage-04 wiring)"
+            provider = EquityProvider(
+                rng.child(idx, state.round_idx),
+                state.config,
+                pot=pot_total(state),
+                to_call=state.to_call(idx),
+            )
+            # The strategy reads `provider.rng` as its own stream — the same
+            # child that scored its equity — keeping the hand reproducible.
+            kind, amount = state.players[idx].brain.act(
+                p, state, idx, provider, provider.rng)
 
         owed = max(0, open_bet - state.round_bets.get(idx, 0))
         if kind == FOLD:
@@ -172,6 +189,9 @@ def run_betting_round(state: "GameState", actions_override=None) -> None:
             paid = gross
             state.aggro_count += 1
             bet_kind = "RAISE"
+            if state.round_idx == 0:
+                # Aggressor signal: last preflop raiser (c-bet key for Passive/Aggressive).
+                state.preflop_raise_by = idx
         else:
             raise ValueError(f"unknown action kind: {kind!r}")
 
@@ -333,7 +353,7 @@ def run_hand(players, dealer_pos, rng, config, actions_override=None):
             continue                    # run-out shortcut: no betting possible
 
         street_script = actions_override.get(street) if actions_override else None
-        run_betting_round(state, street_script)
+        run_betting_round(state, street_script, rng)
         actions_log.extend(state.history)
         state.history = []
 

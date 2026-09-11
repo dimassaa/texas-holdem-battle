@@ -35,6 +35,13 @@ BANDS = {
 
 
 def play_share(strategy):
+    if not hasattr(AggressiveStrategy, "_play_range"):
+        # Table-1 bands can only be audited against wired ranges. Failing loudly
+        # with the fix beats a confusing AttributeError caught far from the cause.
+        pytest.fail(
+            "preflop equity table missing — run build_preflop_table to create "
+            "data/preflop_equity.npy, or the range audit has nothing to measure"
+        )
     return {
         "Tight": TIGHT_RANGE,
         "Loose": LOOSE_RANGE,
@@ -44,6 +51,11 @@ def play_share(strategy):
 
 
 def raise_share(strategy):
+    if not hasattr(AggressiveStrategy, "_raise_range"):
+        pytest.fail(
+            "preflop equity table missing — run build_preflop_table to create "
+            "data/preflop_equity.npy, or the range audit has nothing to measure"
+        )
     return {
         "Tight": TIGHT_PREMIUM,
         "Loose": LooseStrategy._top10,

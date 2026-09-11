@@ -197,10 +197,13 @@ TIGHT_PREMIUM = _type_set(
 )
 LOOSE_RANGE = _type_set(
     pairs=tuple(range(2, 15)),
-    suited=((14, lo) for lo in range(2, 15)),       # A2s+
-    offsuit=((14, 12), (14, 11), (14, 10), (13, 12), (13, 11), (12, 11)),  # KTo+ QJo+
+    suited=(*((h, lo) for h in range(12, 15) for lo in range(2, h)),   # Q2s+ K2s+ A2s+
+            *((lo, lo + 2) for lo in range(2, 13)),                 # 2-apart suited (42s..J9s, KJs, AQs)
+            *((lo, lo + 3) for lo in range(2, 12)),                 # 3-apart suited (53s..J8s, Q9s, KTs)
+            (9, 8), (8, 7), (10, 9), (11, 10)),                     # 87s 98s T9s JTs
+    offsuit=(*((h, lo) for h in range(10, 15) for lo in range(2, h)
+               if h - lo in (1, 2, 3, 4)),),                        # T9o..KJo step gaps
 )
-LOOSE_RAISE = None  # filled from the equity table in visited ranges
 
 STRATEGIES = {}
 
@@ -333,7 +336,7 @@ git add poker/player.py tests/test_decision_helpers.py && git commit -m "feat: s
 - Modify: `poker/player.py`
 - Test: `tests/test_tight.py`
 
-**Spec (doc §5.1 + Table 2):** preflop plays 77+/AQo+/AJs+/KQs; early position only JJ+/AK. Postflop call floor 0.6/0.7/0.75 by street (heads-up only); bet/raise only with very strong equity (≥0.75) or made two-pair+; folds to aggression when below the required share.
+**Spec (doc §5.1 + Table 2):** preflop plays a tight-but-reasonable 55+/ATo+/A9s+ range (widened from the original 77+/AQo+/AJs+/KQs in Task 4.6 to land in Table-1's 12-15% play band); early position only JJ+/AK. Postflop call floor 0.6/0.7/0.75 by street (heads-up only); bet/raise only with very strong equity (≥0.75) or made two-pair+; folds to aggression when below the required share.
 
 - [ ] **Step 1: Write the failing tests**
 

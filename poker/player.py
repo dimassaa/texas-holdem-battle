@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from poker.actions import Action, ALLIN, BET, CALL, CHECK, FOLD, RAISE
+from poker.actions import Action, BET, CALL, CHECK, FOLD, RAISE
 from poker.config import Config
 from poker.equity import EquityProvider, hand_type_index
 
@@ -28,6 +28,9 @@ class Player:
     contributed: int = 0   # total chips committed across the whole hand
     stats: dict = field(default_factory=dict)
     rank: int = 0          # seat index, set by the simulator when seating
+    # brain is a Strategy instance set at seating; forward reference spares a
+    # circular import (Strategy is defined later in this module).
+    brain: "Strategy | None" = None
 
 
 class Strategy:
@@ -140,7 +143,6 @@ LOOSE_RANGE = _type_set(
     offsuit=(*((h, lo) for h in range(10, 15) for lo in range(2, h)
                if h - lo in (1, 2, 3, 4)),),                        # T9o..KJo step gaps
 )
-LOOSE_RAISE = None  # filled from the equity table in visited ranges
 
 STRATEGIES = {}
 
@@ -366,7 +368,6 @@ class AggressiveStrategy(Strategy):
 def _wire_ranges_from_table(path: str) -> None:
     """Attach equity-ranked ranges to Aggressive/Passive/Loose from the saved
     preflop table (Stage 03). Deterministic; runs once at import time."""
-    import numpy as np
     table = np.load(path)
     top20 = ranked_types(table, 0.20)
     top25 = ranked_types(table, 0.25)
