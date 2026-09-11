@@ -111,20 +111,34 @@ def ranked_types(table, fraction: float) -> frozenset:
 
 
 # Preflop ranges (exact lists; percentages audited in Task 4.6).
+# Widened from the plan's literal (was 6.6%) to Table-1's 12-15% band:
+# 14.5% of combos measured by the audit. Keeps TIGHT_PREMIUM mandatory (JJ+/AK).
 TIGHT_RANGE = _type_set(
-    pairs=(14, 13, 12, 11, 10, 9, 8, 7),           # 77+
-    suited=((14, 11), (14, 12), (14, 13), (13, 12)),  # AJs, AQs, AKs, KQs
-    offsuit=((14, 13), (14, 12)),                   # AKo, AQo
+    pairs=(14, 13, 12, 11, 10, 9, 8, 7, 6, 5),     # 55+
+    suited=((14, 9), (14, 10), (14, 11), (14, 12), (14, 13),  # A9s-AKs
+            (13, 12), (13, 11),                     # KQs, KJs
+            (12, 11), (12, 10),                     # QJs, QTs
+            (11, 10), (10, 9), (9, 8)),             # JTs, T9s, 98s
+    offsuit=((14, 13), (14, 12), (14, 11), (14, 10),  # AKo-ATo
+             (13, 12), (13, 11), (12, 11)),         # KQo, KJo, QJo
 )
 TIGHT_PREMIUM = _type_set(
     pairs=(14, 13, 12, 11),  # JJ+
     suited=((14, 13),),      # AKs
     offsuit=((14, 13),),     # AKo
 )
+# Widened from the plan's literal (was 14.9%) to Table-1's ~40% band:
+# 39.7% of combos measured by the audit. Superset of both LooseStrategy's
+# preferred (TIGHT_PREMIUM) raise hands and its re-raise set (top-10%),
+# so no wired hand falls into the range gate.
 LOOSE_RANGE = _type_set(
-    pairs=tuple(range(2, 15)),
-    suited=((14, lo) for lo in range(2, 15)),       # A2s+
-    offsuit=((14, 12), (14, 11), (14, 10), (13, 12), (13, 11), (12, 11)),  # KTo+ QJo+
+    pairs=tuple(range(2, 15)),                                      # 22+
+    suited=(*((h, lo) for h in range(12, 15) for lo in range(2, h)),   # Q2s+ K2s+ A2s+
+            *((lo, lo + 2) for lo in range(2, 13)),                 # 2-apart suited (42s..J9s, KJs, AQs)
+            *((lo, lo + 3) for lo in range(2, 12)),                 # 3-apart suited (53s..J8s, Q9s, KTs)
+            (9, 8), (8, 7), (10, 9), (11, 10)),                     # 87s 98s T9s JTs
+    offsuit=(*((h, lo) for h in range(10, 15) for lo in range(2, h)
+               if h - lo in (1, 2, 3, 4)),),                        # T9o..KJo step gaps
 )
 LOOSE_RAISE = None  # filled from the equity table in visited ranges
 
