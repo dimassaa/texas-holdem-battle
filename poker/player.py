@@ -159,3 +159,46 @@ def bet_size(state, idx, fraction, min_bet) -> int:
     size = int(round(raw))
     from poker.game import max_raise_amount  # local import breaks the game<->player cycle
     return min(max_raise_amount(state, idx), max(min_bet, size))
+
+
+@_register
+class TightStrategy(Strategy):
+    """Plays only premium starting hands; posts flop only with strong equity
+    or a made two-pair+ hand; value-bets very strong hands."""
+
+    name = "Tight"
+    _FLOORS = {1: 0.60, 2: 0.70, 3: 0.75}   # street -> heads-up call floor
+
+    def _preflop_action(self, player, state, idx, provider):
+        from poker.equity import start_hand_type
+        pos = relative_position(state, idx)
+        htype = start_hand_type(player.hole)
+        action_range = TIGHT_RANGE if pos != "early" else TIGHT_PREMIUM
+        if htype not in action_range:
+            return Action(FOLD, 0)
+        open_bet = max(state.round_bets.values(), default=0)
+        to_call = state.to_call(idx)
+        if htype in TIGHT_PREMIUM or (to_call == 0):
+            # premium or unopened pot: raise to a normal size when allowed
+            if state.can_raise(idx) and open_bet == 0:
+                amount = max(state.config.bb, 3 * state.config.bb)
+                return Action(RAISE, amount)
+            if to_call > 0 and to_call <= player.stack:
+                return Action(CALL, to_call)
+            return Action(CHECK, 0) if to_call == 0 else Action(FOLD, 0)
+        return Action(CALL, to_call) if to_call <= player.stack else Action(FOLD, 0)
+
+    def act(self, player, state, idx, provider, rng):
+        if state.round_idx == 0:
+            return self._preflop_action(player, state, idx, provider)
+        equity = provider.equity(player.hole, state.board, state.num_opponents(idx))
+        req = required_equity(provider, state.num_opponents(idx),
+                              self._FLOORS[state.round_idx], style_factor=1.15)
+        if equity >= req:
+            to_call = state.to_call(idx)
+            if to_call == 0:
+                if equity >= 0.75 and state.can_raise(idx):
+                    return Action(BET, bet_size(state, idx, 0.6, state.config.min_bet))
+                return Action(CHECK, 0)
+            return Action(CALL, min(player.stack, to_call))
+        return Action(FOLD, 0)
