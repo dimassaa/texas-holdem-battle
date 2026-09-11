@@ -202,3 +202,78 @@ class TightStrategy(Strategy):
                 return Action(CHECK, 0)
             return Action(CALL, min(player.stack, to_call))
         return Action(FOLD, 0)
+
+
+@_register
+class LooseStrategy(Strategy):
+    """Wide range, many calls, minimal raising; bet/raise only with made hands."""
+
+    name = "Loose"
+    _FLOORS = {1: 0.35, 2: 0.40, 3: 0.50}
+
+    def _preflop_action(self, player, state, idx, provider):
+        from poker.equity import start_hand_type
+        if start_hand_type(player.hole) not in LOOSE_RANGE:
+            return Action(FOLD, 0)
+        to_call = state.to_call(idx)
+        raise_ok = start_hand_type(player.hole) in self._top10 if hasattr(self, "_top10") else False
+        # Engine rejects RAISE with owed==0 (game.py:168) — only re-raise when a net
+        # bet is outstanding, mirroring PassiveStrategy._preflop_action.
+        if raise_ok and state.can_raise(idx) and state.to_call(idx) > 0:
+            return Action(RAISE, max(state.config.bb, 4 * state.config.bb))
+        return Action(CALL, to_call) if to_call <= player.stack else Action(FOLD, 0)
+
+    def act(self, player, state, idx, provider, rng):
+        if state.round_idx == 0:
+            return self._preflop_action(player, state, idx, provider)
+        eq = provider.equity(player.hole, state.board, state.num_opponents(idx))
+        req = required_equity(provider, state.num_opponents(idx),
+                              self._FLOORS[state.round_idx], style_factor=0.9)
+        if state.to_call(idx) == 0:
+            # loose bets/raises only with a made pair or better: use equity 0.5
+            # as a proxy for a hand that can win at showdown vs one opponent.
+            if eq >= 0.5 and state.can_raise(idx):
+                return Action(BET, bet_size(state, idx, 0.5, state.config.min_bet))
+            return Action(CHECK, 0)
+        if eq >= req:
+            return Action(CALL, min(player.stack, state.to_call(idx)))
+        return Action(FOLD, 0)
+
+
+@_register
+class PassiveStrategy(Strategy):
+    """Tight-folding preflop, check/call postflop, raises only set+."""
+
+    name = "Passive"
+    _FLOORS = {1: 0.40, 2: 0.45, 3: 0.55}
+    _play_range = TIGHT_RANGE        # conservative default until wired in Task 4.6
+    _raise_range = _type_set(pairs=(14, 13, 12), suited=((14, 13),), offsuit=((14, 13),))
+
+    def _preflop_action(self, player, state, idx, provider):
+        from poker.equity import start_hand_type
+        htype = start_hand_type(player.hole)
+        if htype not in self._play_range:
+            return Action(FOLD, 0)
+        to_call = state.to_call(idx)
+        # Only re-raise an existing open bet — engine rejects RAISE with owed==0
+        # (game.py:168). to_call>0 ⇔ owed>0; open_bet alone stays true for the BB
+        # whose own blind already covers it.
+        if htype in self._raise_range and state.can_raise(idx) and state.to_call(idx) > 0:
+            return Action(RAISE, max(state.config.bb, 4 * state.config.bb))
+        return Action(CALL, to_call) if to_call <= player.stack else Action(FOLD, 0)
+
+    def act(self, player, state, idx, provider, rng):
+        if state.round_idx == 0:
+            return self._preflop_action(player, state, idx, provider)
+        eq = provider.equity(player.hole, state.board, state.num_opponents(idx))
+        req = required_equity(provider, state.num_opponents(idx),
+                              self._FLOORS[state.round_idx], style_factor=1.0)
+        if state.to_call(idx) == 0:
+            # passive bets almost never; bet (not RAISE) an unopened pot with
+            # set+: RAISE would trip owed==0 assert in game.py:168.
+            if eq >= 0.95 and state.can_raise(idx):
+                return Action(BET, bet_size(state, idx, 0.5, state.config.min_bet))
+            return Action(CHECK, 0)
+        if eq >= req * 0.95:   # documented slight looseness of passive callers
+            return Action(CALL, min(player.stack, state.to_call(idx)))
+        return Action(FOLD, 0)
