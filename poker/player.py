@@ -179,6 +179,22 @@ def bet_size(state, idx, fraction, min_bet) -> int:
     return min(max_raise_amount(state, idx), max(min_bet, size))
 
 
+def raise_size(state, idx, desired) -> int:
+    """Total wager for a raise that the engine will always accept as legal.
+
+    The engine asserts gross = amount - round_bets[actor] >= last_full_raise
+    (game.py). A fixed 3/4bb target under-shoots that increment from any seat
+    with chips already committed this round (the BB re-raising, or anyone who
+    called and then pops again), causing an engine AssertionError — the crash
+    the Task-4.4/4.5 legality fixes only partially covered. Flooring the wager
+    at own + to_call + last_full_raise makes gross exactly to_call + increment,
+    which is legal and still a genuine raise from any seat geometry.
+    """
+    own = state.round_bets.get(idx, 0)
+    legal_min = own + state.to_call(idx) + state.last_full_raise
+    return max(int(desired), legal_min)
+
+
 @_register
 class TightStrategy(Strategy):
     """Plays only premium starting hands; posts flop only with strong equity
@@ -215,7 +231,9 @@ class TightStrategy(Strategy):
         if equity >= req:
             to_call = state.to_call(idx)
             if to_call == 0:
-                if equity >= 0.75 and state.can_raise(idx):
+                # A stack below the minimum bet cannot make a legal BET
+                # (engine: assert paid >= min_bet) — check instead.
+                if equity >= 0.75 and state.can_raise(idx) and player.stack >= state.config.min_bet:
                     return Action(BET, bet_size(state, idx, 0.6, state.config.min_bet))
                 return Action(CHECK, 0)
             return Action(CALL, min(player.stack, to_call))
@@ -236,9 +254,11 @@ class LooseStrategy(Strategy):
         to_call = state.to_call(idx)
         raise_ok = start_hand_type(player.hole) in self._top10 if hasattr(self, "_top10") else False
         # Engine rejects RAISE with owed==0 (game.py:168) — only re-raise when a net
-        # bet is outstanding, mirroring PassiveStrategy._preflop_action.
+        # bet is outstanding, mirroring PassiveStrategy._preflop_action. The 4bb
+        # target is only the desired size: raise_size floors it at the legal
+        # minimum from a seat that already has chips committed (e.g. the BB).
         if raise_ok and state.can_raise(idx) and state.to_call(idx) > 0:
-            return Action(RAISE, max(state.config.bb, 4 * state.config.bb))
+            return Action(RAISE, raise_size(state, idx, max(state.config.bb, 4 * state.config.bb)))
         return Action(CALL, to_call) if to_call <= player.stack else Action(FOLD, 0)
 
     def act(self, player, state, idx, provider, rng):
@@ -250,7 +270,7 @@ class LooseStrategy(Strategy):
         if state.to_call(idx) == 0:
             # loose bets/raises only with a made pair or better: use equity 0.5
             # as a proxy for a hand that can win at showdown vs one opponent.
-            if eq >= 0.5 and state.can_raise(idx):
+            if eq >= 0.5 and state.can_raise(idx) and player.stack >= state.config.min_bet:
                 return Action(BET, bet_size(state, idx, 0.5, state.config.min_bet))
             return Action(CHECK, 0)
         if eq >= req:
@@ -264,7 +284,7 @@ class PassiveStrategy(Strategy):
 
     name = "Passive"
     _FLOORS = {1: 0.40, 2: 0.45, 3: 0.55}
-    _play_range = TIGHT_RANGE        # conservative default until wired in Task 4.6
+    _play_range = TIGHT_RANGE   # wired from ranked_types by Task 4.6 when the table exists
     _raise_range = _type_set(pairs=(14, 13, 12), suited=((14, 13),), offsuit=((14, 13),))
 
     def _preflop_action(self, player, state, idx, provider):
@@ -275,9 +295,10 @@ class PassiveStrategy(Strategy):
         to_call = state.to_call(idx)
         # Only re-raise an existing open bet — engine rejects RAISE with owed==0
         # (game.py:168). to_call>0 ⇔ owed>0; open_bet alone stays true for the BB
-        # whose own blind already covers it.
+        # whose own blind already covers it. raise_size keeps the re-raise legal
+        # from committed seats (BB) where the fixed 4bb target under-shoots.
         if htype in self._raise_range and state.can_raise(idx) and state.to_call(idx) > 0:
-            return Action(RAISE, max(state.config.bb, 4 * state.config.bb))
+            return Action(RAISE, raise_size(state, idx, max(state.config.bb, 4 * state.config.bb)))
         return Action(CALL, to_call) if to_call <= player.stack else Action(FOLD, 0)
 
     def act(self, player, state, idx, provider, rng):
@@ -289,7 +310,7 @@ class PassiveStrategy(Strategy):
         if state.to_call(idx) == 0:
             # passive bets almost never; bet (not RAISE) an unopened pot with
             # set+: RAISE would trip owed==0 assert in game.py:168.
-            if eq >= 0.95 and state.can_raise(idx):
+            if eq >= 0.95 and state.can_raise(idx) and player.stack >= state.config.min_bet:
                 return Action(BET, bet_size(state, idx, 0.5, state.config.min_bet))
             return Action(CHECK, 0)
         if eq >= req * 0.95:   # documented slight looseness of passive callers
@@ -329,16 +350,14 @@ class AggressiveStrategy(Strategy):
         steal = pos == "late" and htype in self._steal_range
         raise_now = (htype in self._raise_range or steal) and state.can_raise(idx)
         # Engine-legality (user-approved, mirrors Task 4.4): RAISE requires net
-        # to_call>0 (game.py:168, owed==0 crash) and the engine computes the
-        # wager's increment as amount MINUS the actor's own chips already in
-        # (game.py:169). A fixed 3/4bb re-raise undershoots that increment from
-        # any seat with chips committed (BB/limper), so target open_bet + one bb
-        # and only raise when there is a net bet outstanding.
+        # to_call>0 (game.py:168, owed==0 crash). raise_size floors the wager at
+        # own + to_call + last_full_raise, which clears the increment assert
+        # (game.py:185) from ANY committed seat — the BB, or a caller popping
+        # again over a re-raise (the earlier to_call+own+bb formula only cleared
+        # it for the blinds).
         if raise_now and state.to_call(idx) > 0:
             base = max(state.config.bb, (3 if not steal else 4) * state.config.bb)
-            own = state.round_bets.get(idx, 0)
-            size = max(base, state.to_call(idx) + own + state.config.bb)
-            return Action(RAISE, size)
+            return Action(RAISE, raise_size(state, idx, base))
         return Action(CALL, to_call) if to_call <= player.stack else Action(FOLD, 0)
 
     def act(self, player, state, idx, provider, rng):
@@ -348,18 +367,22 @@ class AggressiveStrategy(Strategy):
         to_call = state.to_call(idx)
         is_aggressor = getattr(state, "preflop_raise_by", None) == idx
         if to_call == 0:
-            if is_aggressor and state.can_raise(idx):
+            if is_aggressor and state.can_raise(idx) and player.stack >= state.config.min_bet:
                 # continuation bet — fires on every unbet flop/turn/river, even
                 # with air (documented semi-bluff, plan §5.3).
                 return Action(BET, bet_size(state, idx, 0.66, state.config.min_bet))
-            if equity >= 0.5 and state.can_raise(idx):
+            if equity >= 0.5 and state.can_raise(idx) and player.stack >= state.config.min_bet:
                 return Action(BET, bet_size(state, idx, 0.6, state.config.min_bet))
             return Action(CHECK, 0)
         # facing a bet: aggressive prefers raising strong equity over calling
         req = required_equity(provider, state.num_opponents(idx),
                               self._FLOORS[state.round_idx], style_factor=1.05)
         if equity >= req * 1.2 and state.can_raise(idx):
-            return Action(RAISE, bet_size(state, idx, 0.66, state.config.min_bet))
+            # Equity-raise: floor the pot-fraction target so gross clears the
+            # street's increment even when re-raising from a seat that called
+            # earlier (a 0.66-pot raise can otherwise crash the engine assert).
+            return Action(RAISE, raise_size(state, idx,
+                                            bet_size(state, idx, 0.66, state.config.min_bet)))
         if equity >= req:
             return Action(CALL, min(player.stack, to_call))
         return Action(FOLD, 0)

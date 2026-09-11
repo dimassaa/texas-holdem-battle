@@ -29,6 +29,10 @@ class GameState:
     aggro_count: int = 0        # count of bet/raise events this round
     history: List[dict] = field(default_factory=list)
     preflop_raise_by: int = -1  # seat that last raised on round 0 (Stage-04 c-bet signal)
+    # Minimum raise increment on the current street (bb at street start, grown
+    # by each full raise). Exposed so strategies can size a legal total wager
+    # even from seats with chips already committed this round.
+    last_full_raise: int = 0
 
     def to_call(self, player_idx: int) -> int:
         """Chips the player must wager to match the current round's highest bet."""
@@ -121,7 +125,7 @@ def run_betting_round(state: "GameState", actions_override=None, rng=None) -> No
     """
     n = len(state.players)
     idx = _setting_first_actor(state)
-    last_full_raise = state.config.bb   # next bet/raise increment must reach this
+    state.last_full_raise = state.config.bb   # next bet/raise increment must reach this
     acted_at = {}                       # seat -> open_bet when it last acted
     safety = 0
     while True:
@@ -185,7 +189,7 @@ def run_betting_round(state: "GameState", actions_override=None, rng=None) -> No
             assert owed > 0, "RAISE with no bet to raise"
             gross = min(amount, max_raise_amount(state, idx)) - state.round_bets.get(idx, 0)
             assert gross <= p.stack, "raise above stack"
-            assert gross >= last_full_raise or gross == p.stack, "raise below minimum increment"
+            assert gross >= state.last_full_raise or gross == p.stack, "raise below minimum increment"
             paid = gross
             state.aggro_count += 1
             bet_kind = "RAISE"
@@ -205,8 +209,8 @@ def run_betting_round(state: "GameState", actions_override=None, rng=None) -> No
             if bet_kind in ("BET", "RAISE"):
                 # A full raise (or an all-in that reaches it) resets the minimum
                 # increment; a short all-in raise keeps it and does not reopen.
-                if paid >= last_full_raise:
-                    last_full_raise = paid
+                if paid >= state.last_full_raise:
+                    state.last_full_raise = paid
             state.history.append({"round": state.round_idx, "pos": idx,
                                   "kind": kind, "amount": paid})
         acted_at[idx] = open_bet if kind in (FOLD, CHECK) else max(state.round_bets.values())

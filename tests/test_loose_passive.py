@@ -1,5 +1,6 @@
 """Loose (wide, passive-betting) and Passive (tight-folding, check-call)."""
 import numpy as np
+import pytest
 from poker.actions import BET, CALL, CHECK, FOLD, RAISE
 from poker.card import card_id as H
 from poker.config import Config
@@ -60,3 +61,22 @@ def test_passive_raises_only_cold_nuts():
     prov = StubProvider(0.95, pot=100, to_call=0)
     a = PassiveStrategy().act(p, st, 3, prov, Rng(0))
     assert a.kind in (CHECK, BET)
+
+
+@pytest.mark.parametrize("mk", [LooseStrategy, PassiveStrategy])
+def test_blind_reraise_meets_increment(mk):
+    # HIGH-1 regression: BB re-raising a 4bb open with 2 chips already in the
+    # pot. A fixed 4bb re-raise (8) gives gross 6 < last_full_raise 8 and
+    # crashes the engine assert (game.py:185). raise_size must floor the wager
+    # at own + to_call + last_full_raise = 16, which gross 14 clears.
+    ps = [Player(name=f"p{i}", strategy=mk.name, stack=200) for i in range(6)]
+    st = GameState(players=ps, dealer_pos=0, config=CFG)
+    st.board = np.empty(0, dtype=np.int32)
+    st.round_idx = 0
+    st.pot = 0
+    st.round_bets = {0: 1, 1: 2, 2: 8}   # SB, BB, then UTG raises to 4bb
+    st.last_full_raise = 8
+    ps[1].hole = np.array([H(14, 1), H(14, 2)], dtype=np.int32)   # AA in the BB
+    a = mk().act(ps[1], st, 1, None, Rng(0))
+    if a.kind == RAISE:   # Loose raises only when the table wired its _top10
+        assert a.amount - 2 >= 8
