@@ -56,6 +56,10 @@ def starting_bets(state: GameState) -> None:
     eliminated seats are skipped at the session layer, so `players` here are
     exactly the live ones). Bets are always capped by stack.
 
+    Heads-up there is no skipped seat: the button posts SB and the non-button
+    player is the BB, which the two blind indices below already reproduce for
+    any table size.
+
     The blinds live in `round_bets`, and `pot` stays at 0 until the street
     closes: `run_betting_round` moves the whole street into `pot` exactly once
     at finalization, which prevents the blinds from being counted twice.
@@ -86,13 +90,24 @@ def max_raise_amount(state: GameState, player_idx: int) -> int:
 def _setting_first_actor(state: "GameState") -> int:
     """Index of the first actor for this street.
 
-    Preflop: UTG (left of the BB). Postflop: the SB seat (left of the button).
-    Eliminated seats are removed upstream at the session layer, so live indices
-    are contiguous; blinds still sit on real seats.
+    Preflop: UTG (left of the BB); heads-up the button (SB) acts first.
+    Postflop: the SB seat (left of the button), which heads-up is the BB (the
+    non-button). Eliminated seats are removed upstream at the session layer,
+    so live indices are contiguous; blinds still sit on real seats.
+
+    The explicit `n >= 3 else dealer_pos` preflop branch is a regression pin,
+    not a behavior change: the old one-line formula `(dealer_pos + 2) % n`
+    already returned `dealer_pos` whenever n == 2 (modulo 2 collapses +2 onto
+    the button), so both formulations agree for every table size — the branch
+    just reads the heads-up intent directly (locked by
+    test_engine_short_handed).
     """
+    n = len(state.players)
     if state.round_idx == 0:
-        return (state.dealer_pos + 2) % len(state.players)
-    return (state.dealer_pos + 1) % len(state.players)
+        # preflop: left of BB normally; heads-up the SB (button) acts first.
+        return (state.dealer_pos + 2) % n if n >= 3 else state.dealer_pos
+    # postflop: left of button every time — heads-up that IS the BB (non-button).
+    return (state.dealer_pos + 1) % n
 
 
 def _round_finished(state: "GameState") -> bool:
@@ -213,6 +228,15 @@ def run_betting_round(state: "GameState", actions_override=None, rng=None) -> No
                     state.last_full_raise = paid
             state.history.append({"round": state.round_idx, "pos": idx,
                                   "kind": kind, "amount": paid})
+        elif kind in (FOLD, CHECK):
+            # The history is the Stage-06 audit trail and must carry EVERY
+            # completed action, not only the ones that moved chips: folds and
+            # checks are decisions too (the session's fold/aggression counts,
+            # the adaptive feeder's "plays"/"folds" signals, and Stage-06
+            # street analysis all read them). They post no wager, so the record
+            # keeps the same key shape with amount 0.
+            state.history.append({"round": state.round_idx, "pos": idx,
+                                  "kind": kind, "amount": 0})
         acted_at[idx] = open_bet if kind in (FOLD, CHECK) else max(state.round_bets.values())
         idx = (idx + 1) % n
     # Finalize: move the whole street into the pot exactly once.

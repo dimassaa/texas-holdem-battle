@@ -26,6 +26,10 @@ class Player:
     hole: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int32))
     folded: bool = False
     all_in: bool = False
+    # Elimination flag set by the session layer: first-passage ruin (stack < BB,
+    # stage05.md) freezes the seat permanently. Ruined seats keep their `rank`
+    # forever so session statistics stay anchored to the original seat number.
+    ruined: bool = False
     contributed: int = 0   # total chips committed across the whole hand
     stats: dict = field(default_factory=dict)
     rank: int = 0          # seat index, set by the simulator when seating
