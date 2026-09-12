@@ -267,13 +267,17 @@ def bb100_compare(combo_df):
     xs = np.arange(len(names))
     ys = np.asarray(means)[order]
     errs = np.asarray(cis)[order]
-    fig, ax = plt.subplots(figsize=(9, 5))
+    # Taller than the other figures: the ten combo labels sit on a 45-degree
+    # baseline, so the figure needs height budget for that rotated row or the
+    # labels clip at the canvas edge (reported in the README review).
+    fig, ax = plt.subplots(figsize=(12, 7.5))
     ax.bar(xs, ys, yerr=errs, capsize=4, color="steelblue")
     ax.axhline(0, color="black", linewidth=0.8)     # zero line: above = profit
     ax.set_xticks(xs)
     ax.set_xticklabels([names[i] for i in order], rotation=45, ha="right")
     ax.set_ylabel("mean BB/100 (seats x seeds, flattened)")
     ax.set_title("Headline BB/100 by combo with 95% CI")
+    fig.tight_layout()
     return fig, ax
 
 
