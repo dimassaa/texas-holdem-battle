@@ -140,9 +140,17 @@ class EquityProvider:
         # sequences), so the (hand, board, n_opp) key is flattened. Hand is
         # always 2 cards and board length is fixed per game state, making the
         # flattening injective: each state gets its own deterministic stream.
-        eq = calc_equity(hand, board, n_opp,
-                         self.rng.child(*key[0], *key[1], key[2]),
-                         self.config.mc_iterations)
+        #
+        # calc_equity_jit routes the rollout scoring through the numba batch
+        # scorer (poker/jit.py) instead of the pure-Python score_batch. Their
+        # outputs are byte-identical -- pinned by test_jit_equivalence and the
+        # 200k-hand validation -- and the rng stream is consumed identically,
+        # so the provider's numbers (and therefore hands.jsonl bytes) are
+        # unchanged; only runtime drops by ~250x on MC-heavy sessions (doc
+        # §8.1's promised numpy+numba+multiprocessing stack).
+        eq = calc_equity_jit(hand, board, n_opp,
+                             self.rng.child(*key[0], *key[1], key[2]),
+                             self.config.mc_iterations)
         self._cache[key] = eq
         return eq
 
