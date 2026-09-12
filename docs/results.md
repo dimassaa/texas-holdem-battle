@@ -1,6 +1,6 @@
 # Results: Which No-Bluff Style Survives and Profits?
 
-This is the analysis writeup for the production campaign (10 combinations x 5 seeds x a nominal 50,000 hands, config digest `21f78e32923c9779`). It answers the core question of `docs/Texas Hold'em Simulator for Strategy Analysis (No Bluff).md`: *which style is most profitable in the long run, and how does mixing styles change it?* — under the rules the simulator actually implements. The raw data behind every number is the committed `output/reports/summary_sessions.csv` and `output/reports/summary_combo.csv`.
+This is the analysis writeup for the production campaign (10 combinations x 5 seeds x a nominal 50,000 hands, config digest `21f78e32923c9779`). It answers the project's core question — *which style is most profitable in the long run, and how does mixing styles change it?* — under the rules the simulator actually implements. The raw data behind every number is the committed `output/reports/summary_sessions.csv` and `output/reports/summary_combo.csv`.
 
 ---
 

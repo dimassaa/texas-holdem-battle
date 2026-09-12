@@ -18,7 +18,7 @@ A deterministic simulation engine that answers one question: *which fixed poker 
 - [Tech Stack](#tech-stack)
 - [Project Structure](#project-structure)
 - [The Model](#the-model)
-- [Metrics (document section 7.1)](#metrics-document-section-71)
+- [Metrics](#metrics)
 - [Quick Start](#quick-start)
 - [Results](#results)
 - [Testing](#testing)
@@ -28,7 +28,7 @@ A deterministic simulation engine that answers one question: *which fixed poker 
 
 ## Introduction
 
-This simulator is a quantitative comparison of six rule-defined, **no-bluff** poker styles, following the experiment plan in *document section 7* of `docs/Texas Hold'em Simulator for Strategy Analysis (No Bluff).md`. Each style is a pure function of *hand, board, equity, pot odds, position, and action history* — there is no learning and no deception, so the results isolate the structural profitability of a style rather than its table-craft.
+This simulator is a quantitative comparison of six rule-defined, **no-bluff** poker styles, following the experiment plan in the stage specifications (`docs/specs/`). Each style is a pure function of *hand, board, equity, pot odds, position, and action history* — there is no learning and no deception, so the results isolate the structural profitability of a style rather than its table-craft.
 
 Every session is fully deterministic: a fixed seed drives the deck, the button, and the per-decision equity Monte Carlo, so a session replay produces **byte-identical** raw hand logs. That determinism lets the shipped reports be re-derived exactly from the committed `output/reports/` artifacts, and lets any single number be recomputed, not retrusted.
 
@@ -53,7 +53,7 @@ poker/
 ├── equity.py          # Preflop table + Monte Carlo equity (400 iters)
 ├── player.py          # Six strategy bots + base class
 ├── game.py            # Hand, betting rounds, side pots, all-in escape
-├── simulator.py       # run_session, compute_session_stats (§7.1 metrics)
+├── simulator.py       # run_session, compute_session_stats (metrics)
 ├── experiments.py     # run_campaign / run_combo_seeds / manifest I/O
 ├── analysis.py        # summary CSVs + all five plot families
 ├── config.py          # frozen Config (single source of rule truth + digest)
@@ -73,7 +73,7 @@ output/logs/           # raw session logs (gitignored; manifest is committed)
 - **Fixed 6 seats**, one style per seat; initial stack 400 chips = 200 big blinds; blinds 1/2; the button rotates every hand.
 - **Equity: Monte Carlo at 400 iterations** on a Numba fast path (preflop uses a precomputed table; postflop simulates runouts).
 
-## Metrics (document section 7.1)
+## Metrics
 
 All session metrics are computed by one implementation, `compute_session_stats`, from the persisted raw hand log. The BB/100 denominator is the number of hands a seat was *live* for (before its first-passage ruin), so a seat that busts early is not diluted by dead hands; seats with zero live hands report `None`, never `0.0`.
 
