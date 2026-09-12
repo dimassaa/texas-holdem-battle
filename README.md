@@ -161,7 +161,6 @@ Key plots (all under `output/reports/plots/`):
 ![Stack evolution through a mixed-configuration session](output/reports/plots/stack_evolution_benchmark_mix.png)
 ![Loose table: the stack burn-down that truncates its sessions](output/reports/plots/stack_evolution_six_loose.png)
 
-![Final-stack distribution in the one-each table](output/reports/plots/stack_boxplot_benchmark_mix.png)
 
 ![Tight table: stack survival over time](output/reports/plots/ruin_curve_six_tight.png)
 ![Mathematician table: every seed collapses by ~2,000 hands](output/reports/plots/ruin_curve_six_mathematician.png)
